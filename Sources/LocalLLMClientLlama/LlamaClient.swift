@@ -18,7 +18,7 @@ public final class LlamaClient: LLMClient {
     /// Owned by this client; freed in `deinit` or when retired.
     nonisolated(unsafe) private var chatParams: UnsafeMutablePointer<llm_chat_params>?
     nonisolated(unsafe) private var retiredChatParams: [UnsafeMutablePointer<llm_chat_params>] = []
-    private var activeStreams = 0
+    nonisolated(unsafe) private var activeStreams = 0
 
     /// The tools currently configured for this client.
     var tools: [AnyLLMTool] {
@@ -178,7 +178,8 @@ public final class LlamaClient: LLMClient {
     public func responseStream(from input: LLMInput) async throws -> AsyncThrowingStream<StreamingChunk, any Error> {
         // Snapshot the chat parameters for this stream; `endStream` (below)
         // releases the slot so `setTools` can free retired pointers safely.
-        let chatParams = beginStream()
+        // The pointer is only read inside the task and never escapes it.
+        nonisolated(unsafe) let chatParams = beginStream()
 
         // Create the stream first (this can throw)
         let textStreamGenerator: Generator
