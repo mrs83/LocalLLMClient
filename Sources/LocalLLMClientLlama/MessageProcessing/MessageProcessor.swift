@@ -51,7 +51,9 @@ public struct MessageProcessor: Sendable {
         )
         
         // Step 5: Decode into context
-        try llamaDecoder.decode(
+        try decodePrompt(
+            prompt,
+            imageChunks: imageChunks,
             chunks: chunks,
             context: context,
             multimodal: multimodal
@@ -81,12 +83,39 @@ public struct MessageProcessor: Sendable {
             from: prompt,
             imageChunks: imageChunks
         )
-        
-        try llamaDecoder.decode(
+
+        try decodePrompt(
+            prompt,
+            imageChunks: imageChunks,
             chunks: chunks,
             context: context,
             multimodal: multimodal
         )
+    }
+
+    /// Decodes a rendered prompt into the context.
+    ///
+    /// Text-only prompts go through the token-level prefix cache, so a shared
+    /// system/tool prefix stays evaluated across requests instead of being
+    /// decoded again. Image prompts keep the chunk path, which owns the
+    /// multimodal state.
+    private func decodePrompt(
+        _ prompt: String,
+        imageChunks: [[LLMInputImage]],
+        chunks: [MessageChunk],
+        context: Context,
+        multimodal: MultimodalContext?
+    ) throws(LLMError) {
+        if imageChunks.isEmpty {
+            try context.decode(prompt: prompt)
+        } else {
+            context.lastPromptTokens.removeAll()
+            try llamaDecoder.decode(
+                chunks: chunks,
+                context: context,
+                multimodal: multimodal
+            )
+        }
     }
     
     /// Get the rendered prompt without decoding (useful for debugging)

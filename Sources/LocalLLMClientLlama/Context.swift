@@ -18,6 +18,10 @@ public final class Context: @unchecked Sendable {
     let model: Model
     let extraEOSTokens: Set<String>
     private var promptCaches: [(chunk: MessageChunk, lastPosition: llama_pos)] = []
+    /// Tokens of the last prompt decoded into the sequence. Generated tokens
+    /// occupy the positions after them, so the next prompt can keep the cells
+    /// it shares with this one and drop only the tail.
+    package var lastPromptTokens: [llama_token] = []
     let pauseHandler: PauseHandler
 
     package var vocab: OpaquePointer {
@@ -110,6 +114,7 @@ public final class Context: @unchecked Sendable {
 
     public func clear() {
         discardPendingTokens()
+        lastPromptTokens.removeAll()
 
         guard let kv = llama_get_memory(context) else {
             return
