@@ -112,6 +112,17 @@ public final class LlamaClient: LLMClient {
         chatParams = newParams
     }
 
+    /// Drops the KV cache and prompt cache so the next request starts from an
+    /// empty context.
+    ///
+    /// Callers that rebuild the whole transcript per request must use this:
+    /// sliding-window / recurrent models cannot reliably trim the sequence to
+    /// an arbitrary prefix, so the cached-prefix path lets the context grow
+    /// request after request until `n_ctx` overflows.
+    public func clearContext() {
+        context.clear()
+    }
+
     /// Marks a response stream as in flight and returns the chat parameters
     /// it must parse with.
     private func beginStream() -> UnsafeMutablePointer<llm_chat_params>? {
