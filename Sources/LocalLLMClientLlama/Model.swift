@@ -37,6 +37,12 @@ final class Model {
         llama_model_free(model)
     }
 
+    /// The context window the model was trained with, as declared in the GGUF
+    /// metadata (for example 262144 for a 256k model).
+    var trainedContextLength: Int {
+        Int(llama_model_n_ctx_train(model))
+    }
+
     func makeAndAllocateContext(with ctx_params: llama_context_params) throws(LLMError) -> OpaquePointer {
         guard let context = llama_init_from_model(model, ctx_params) else {
             throw .invalidParameter(reason: "Failed to create context")

@@ -45,6 +45,16 @@ public final class Context: @unchecked Sendable {
     public init(url: URL, parameter: LlamaClient.Parameter = .default) throws(LLMError) {
         initializeLlama()
 
+        let model = try Model(url: url)
+
+        // A context of zero means "use the window the model was trained with".
+        // The resolved value is stored so generation stops at the real limit
+        // instead of at zero.
+        var parameter = parameter
+        if parameter.context <= 0 {
+            parameter.context = model.trainedContextLength
+        }
+
         var ctx_params = llama_context_default_params()
         ctx_params.n_ctx = UInt32(parameter.context)
         ctx_params.n_threads = Int32(parameter.numberOfThreads ?? Self.defaultNumberOfThreads)
@@ -52,7 +62,7 @@ public final class Context: @unchecked Sendable {
 
         self.parameter = parameter
         self.pauseHandler = PauseHandler(disableAutoPause: parameter.options.disableAutoPause)
-        self.model = try Model(url: url)
+        self.model = model
         self.context = try model.makeAndAllocateContext(with: ctx_params)
         batch = llama_batch_init(Int32(parameter.batch), 0, 1)
         extraEOSTokens = parameter.options.extraEOSTokens
