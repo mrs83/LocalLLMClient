@@ -22,7 +22,13 @@ struct StandardToolInstructionProcessor: ToolInstructionProcessor {
     init() {}
 
     func hasNativeToolSupport(in template: String) -> Bool {
-        template.contains("tools")
+        // A template supports tools natively when it reads the `tools`
+        // variable, e.g. `{{ tools }}` or `{%- if tools %}`. A bare mention
+        // in prose or a comment must not count, otherwise the fallback
+        // instruction block is injected on top of a native template and the
+        // model receives two conflicting tool protocols.
+        let nativeUsage = #"\{\{-?\s*tools\b|\{%-?\s*(?:if|for)\s+tools\b"#
+        return template.range(of: nativeUsage, options: .regularExpression) != nil
     }
 
     func processMessages(
@@ -34,12 +40,16 @@ struct StandardToolInstructionProcessor: ToolInstructionProcessor {
             return messages
         }
 
-        var processedMessages = messages
-        
+        // Native templates receive the tools through the template context
+        // and understand the `tool` role, so their messages pass through
+        // untouched.
         if templateHasNativeSupport {
-            // For templates with native tool support, add tools field to system message
-            processedMessages = injectToolsToSystemMessage(processedMessages, tools: tools)
+            return messages
         }
+
+        // Fallback for templates without tool support: inject a hand-written
+        // instruction block and wrap tool results as assistant text.
+        var processedMessages = messages
 
         // Only add tool instructions if the last message is not a tool message
         if !isLastMessageTool(processedMessages) {

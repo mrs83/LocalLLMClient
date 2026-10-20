@@ -9,12 +9,28 @@ public final class LlamaClient: LLMClient {
     private let context: Context
     private let multimodal: MultimodalContext?
     private let messageProcessor: MessageProcessor
-    let tools: [AnyLLMTool]
-    /// Owned by this client; freed in `deinit`.
-    nonisolated(unsafe) private let chatParamsPtr: UnsafeMutablePointer<llm_chat_params>?
+
+    /// Guards the mutable tool state. `chatParams` is rebuilt by `setTools`,
+    /// so reads and swaps must not race; retired pointers are freed only once
+    /// no response stream can still reference them.
+    private let stateLock = NSLock()
+    nonisolated(unsafe) private var activeTools: [AnyLLMTool]
+    /// Owned by this client; freed in `deinit` or when retired.
+    nonisolated(unsafe) private var chatParams: UnsafeMutablePointer<llm_chat_params>?
+    nonisolated(unsafe) private var retiredChatParams: [UnsafeMutablePointer<llm_chat_params>] = []
+    private var activeStreams = 0
+
+    /// The tools currently configured for this client.
+    var tools: [AnyLLMTool] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return activeTools
+    }
 
     var chatFormat: common_chat_format {
-        get_chat_params_format(chatParamsPtr)
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return get_chat_params_format(chatParams)
     }
 
     /// Initializes a new Llama client.
@@ -59,14 +75,63 @@ public final class LlamaClient: LLMClient {
             multimodal = nil
         }
         self.messageProcessor = messageProcessor ?? MessageProcessorFactory.createAutoProcessor(chatTemplate: context.model.chatTemplate)
-        self.tools = erasedTools
-        self.chatParamsPtr = context.model.buildChatParams(tools: erasedTools)
+        self.activeTools = erasedTools
+        self.chatParams = context.model.buildChatParams(tools: erasedTools)
     }
 
     deinit {
-        if let chatParamsPtr {
-            free_chat_params(chatParamsPtr)
+        if let chatParams {
+            free_chat_params(chatParams)
         }
+        for pointer in retiredChatParams {
+            free_chat_params(pointer)
+        }
+    }
+
+    /// Replaces the tool set used for chat-template rendering and tool-call
+    /// parsing, without reloading the model or reallocating the context.
+    ///
+    /// The old chat parameters are retired and freed once no response stream
+    /// can still reference them, so a long-running generation is never left
+    /// with a dangling pointer.
+    ///
+    /// - Parameter tools: The tools available to the model for this request.
+    public func setTools(_ tools: [AnyLLMTool]) {
+        let newParams = context.model.buildChatParams(tools: tools)
+
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        activeTools = tools
+        if let oldParams = chatParams {
+            if activeStreams == 0 {
+                free_chat_params(oldParams)
+            } else {
+                retiredChatParams.append(oldParams)
+            }
+        }
+        chatParams = newParams
+    }
+
+    /// Marks a response stream as in flight and returns the chat parameters
+    /// it must parse with.
+    private func beginStream() -> UnsafeMutablePointer<llm_chat_params>? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        activeStreams += 1
+        return chatParams
+    }
+
+    /// Releases the stream slot and frees chat parameters retired while the
+    /// stream was running.
+    private func endStream() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        activeStreams -= 1
+        guard activeStreams == 0, !retiredChatParams.isEmpty else { return }
+        for pointer in retiredChatParams {
+            free_chat_params(pointer)
+        }
+        retiredChatParams.removeAll()
     }
 
     /// Generates a text stream from the given input.
@@ -76,6 +141,7 @@ public final class LlamaClient: LLMClient {
     /// - Throws: An `LLMError.failedToDecode` error if the input cannot be decoded.
     public func textStream(from input: LLMInput) throws -> Generator {
         context.discardPendingTokens()
+        let tools = self.tools
 
         do {
             switch input.value {
@@ -110,22 +176,33 @@ public final class LlamaClient: LLMClient {
     /// - Returns: An asynchronous sequence that emits response content (text chunks, tool calls, etc.)
     /// - Throws: An error if generation fails
     public func responseStream(from input: LLMInput) async throws -> AsyncThrowingStream<StreamingChunk, any Error> {
+        // Snapshot the chat parameters for this stream; `endStream` (below)
+        // releases the slot so `setTools` can free retired pointers safely.
+        let chatParams = beginStream()
+
         // Create the stream first (this can throw)
-        let textStreamGenerator = try textStream(from: input)
+        let textStreamGenerator: Generator
+        do {
+            textStreamGenerator = try textStream(from: input)
+        } catch {
+            endStream()
+            throw error
+        }
 
         return AsyncThrowingStream { continuation in
             let processor = StreamingToolCallProcessor(
                 startTag: getToolCallStartTag(),
                 endTag: getToolCallEndTag()
             )
-            
-            Task {
+
+            let task = Task {
+                defer { endStream() }
                 do {
                     var fullText = ""
-                    
+
                     for try await chunk in textStreamGenerator {
                         fullText += chunk
-                        
+
                         // Process the chunk through the tool call processor
                         if let processedText = processor.processChunk(chunk) {
                             continuation.yield(.text(processedText))
@@ -134,7 +211,7 @@ public final class LlamaClient: LLMClient {
 
                     let parserToolCalls = LlamaToolCallParser.parseToolCalls(
                         from: fullText,
-                        chatParams: chatParamsPtr
+                        chatParams: chatParams
                     ) ?? []
                     var toolCalls = processor.toolCalls + parserToolCalls
                     toolCalls = toolCalls.reduce(into: []) { result, toolCall in
@@ -151,6 +228,12 @@ public final class LlamaClient: LLMClient {
                 } catch {
                     continuation.finish(throwing: error)
                 }
+            }
+
+            // A consumer that stops iterating (barge-in, new prompt, view
+            // dismissed) must stop generation instead of decoding to EOS.
+            continuation.onTermination = { _ in
+                task.cancel()
             }
         }
     }
