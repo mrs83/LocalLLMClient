@@ -3,7 +3,7 @@
 import PackageDescription
 import CompilerPluginSupport
 
-let llamaVersion = "b8851"
+let llamaVersion = "b10000"
 let llamaBuildNumber = String(llamaVersion.dropFirst())
 
 // MARK: - Package Dependencies
@@ -180,7 +180,7 @@ packageTargets.append(contentsOf: [
         name: "LocalLLMClientLlamaFramework",
         url:
             "https://github.com/ggml-org/llama.cpp/releases/download/\(llamaVersion)/llama-\(llamaVersion)-xcframework.zip",
-        checksum: "f5eb26820b9890ae026aee4963cd4f43af1c567d39534012f2685601a59c2519"
+        checksum: "325b862774bfbb19d3002449d895b174f6f4c9a681bbd689d2c74c0c0b73d0bb"
     ),
     .target(
         name: "LocalLLMClientLlamaC",

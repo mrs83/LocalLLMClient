@@ -41,7 +41,7 @@ public class MultimodalContext: @unchecked Sendable {
 
         let textStorage = "    \(String(cString: mtmd_default_marker()))    " // spaces for the workaround of tokenizer
         var text = textStorage.withCString {
-            mtmd_input_text(text: $0, add_special: false, parse_special: true)
+            mtmd_input_text(text: $0, text_len: textStorage.utf8.count, add_special: false, parse_special: true)
         }
 
         guard mtmd_tokenize(multimodalContext, chunks, &text, &bitmaps, bitmaps.count) == 0 else {
@@ -69,13 +69,11 @@ package extension Context {
         var newPosition: Int32 = 0
         let chunk = mtmd_input_chunks_get(bitmap.chunks, 1) // 1: <space><img><space>
 
-        let imageTokens = mtmd_input_chunk_get_tokens_image(chunk)
-
         if multimodal.verbose {
             llamaLog(level: .debug, message: "encoding image or slice...\n")
         }
 
-        guard mtmd_encode(multimodal.multimodalContext, imageTokens) == 0 else {
+        guard mtmd_encode_chunk(multimodal.multimodalContext, chunk) == 0 else {
             throw .failedToDecode(reason: "Failed to encode image")
         }
 
@@ -88,7 +86,9 @@ package extension Context {
             position,
             0, // seq_id
             Int32(parameter.batch),
-            &newPosition) == 0 else {
+            &newPosition,
+            nil, // post-decode callback
+            nil) == 0 else {
             throw .failedToDecode(reason: "Failed to decode image")
         }
     }
