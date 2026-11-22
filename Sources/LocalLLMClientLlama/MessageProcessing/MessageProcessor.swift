@@ -134,14 +134,18 @@ public struct MessageProcessor: Sendable {
     }
     
     private func extractImageChunks(from messages: [LLMInput.ChatTemplateMessage]) -> [[LLMInputImage]] {
-        messages.compactMap { message in
-            let images = message.attachments.compactMap { attachment -> LLMInputImage? in
+        // One entry per image, not per message: llama.cpp's mtmd binds one
+        // bitmap to one media marker, and the chat template writes one marker
+        // per image. Grouping a message's images into one entry made a
+        // two-image turn fail with "number of bitmaps does not match number of
+        // markers".
+        messages.flatMap { message in
+            message.attachments.compactMap { attachment -> [LLMInputImage]? in
                 if case let .image(image) = attachment.content {
-                    return image
+                    return [image]
                 }
                 return nil
             }
-            return images.isEmpty ? nil : images
         }
     }
 }
