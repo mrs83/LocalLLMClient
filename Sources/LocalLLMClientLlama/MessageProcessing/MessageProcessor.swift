@@ -247,8 +247,14 @@ public struct MessageProcessorFactory {
         } else if chatTemplate.contains("<|im_start|>") && chatTemplate.contains("<end_of_utterance>") {
             // SmolVLM format
             return smolVLMProcessor()
-        } else if chatTemplate.contains("content[i].type == 'image'") || chatTemplate.contains("<vision>") {
-            // Qwen2VL format
+        } else if chatTemplate.contains("content[i].type == 'image'")
+            || chatTemplate.contains("<vision>")
+            || chatTemplate.contains("<|image_pad|>") {
+            // Qwen2VL format. Qwen2.5-VL's template tests
+            // `content['type'] == 'image'` (no `[i]`) and emits
+            // `<|vision_start|><|image_pad|><|vision_end|>`, so the media
+            // token is the reliable signal; the older `[i]` expression stays
+            // for the templates that use it.
             return qwen2VLProcessor()
         } else if chatTemplate.contains("<|begin_of_text|>") && chatTemplate.contains("<|start_header_id|>") {
             // Llama 3.2 Vision format
