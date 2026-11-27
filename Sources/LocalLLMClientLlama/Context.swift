@@ -23,6 +23,10 @@ public final class Context: @unchecked Sendable {
     /// it shares with this one and drop only the tail.
     package var lastPromptTokens: [llama_token] = []
     let pauseHandler: PauseHandler
+    /// Set when the host abandons a generation. `llama_decode` polls it through
+    /// the context's abort callback, so a prompt being ingested aborts too
+    /// instead of running to the end of a decode nobody reads.
+    private let generationAborted: AbortFlag
 
     package var vocab: OpaquePointer {
         model.vocab
@@ -63,8 +67,18 @@ public final class Context: @unchecked Sendable {
         ctx_params.n_ctx = UInt32(parameter.context)
         ctx_params.n_threads = Int32(parameter.numberOfThreads ?? Self.defaultNumberOfThreads)
         ctx_params.n_threads_batch = ctx_params.n_threads
+        // A cancelled generation must stop inside `llama_decode`, not at the
+        // next token: dropping the consumer of a long prompt used to leave the
+        // whole prefill running to its end.
+        let abortFlag = AbortFlag()
+        ctx_params.abort_callback = { data in
+            guard let data else { return false }
+            return Unmanaged<AbortFlag>.fromOpaque(data).takeUnretainedValue().isSet
+        }
+        ctx_params.abort_callback_data = Unmanaged.passUnretained(abortFlag).toOpaque()
 
         self.parameter = parameter
+        self.generationAborted = abortFlag
         self.pauseHandler = PauseHandler(disableAutoPause: parameter.options.disableAutoPause)
         self.model = model
         self.context = try model.makeAndAllocateContext(with: ctx_params)
@@ -110,6 +124,18 @@ public final class Context: @unchecked Sendable {
         llama_sampler_free(sampling)
         llama_batch_free(batch)
         llama_free(context)
+    }
+
+    /// Asks `llama_decode` to abandon whatever it is computing, prefill
+    /// included, at its next check.
+    public func cancelGeneration() {
+        generationAborted.set()
+    }
+
+    /// Clears the abort flag so the next prompt is not cancelled by a stale
+    /// request. Called as each prompt starts decoding.
+    public func beginGeneration() {
+        generationAborted.clear()
     }
 
     public func clear() {
@@ -178,5 +204,33 @@ public final class Context: @unchecked Sendable {
             }
         }
         return nil
+    }
+}
+
+
+/// A thread-safe abort flag shared with llama.cpp's abort callback.
+///
+/// The callback is a C function pointer, so the flag has to be reachable
+/// through `abort_callback_data` rather than captured.
+package final class AbortFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flagged = false
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return flagged
+    }
+
+    func set() {
+        lock.lock()
+        flagged = true
+        lock.unlock()
+    }
+
+    func clear() {
+        lock.lock()
+        flagged = false
+        lock.unlock()
     }
 }

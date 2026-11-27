@@ -19,6 +19,8 @@ public final class LlamaClient: LLMClient {
     nonisolated(unsafe) private var chatParams: UnsafeMutablePointer<llm_chat_params>?
     nonisolated(unsafe) private var retiredChatParams: [UnsafeMutablePointer<llm_chat_params>] = []
     nonisolated(unsafe) private var activeStreams = 0
+    /// Continuations of hosts waiting for the runtime to go idle.
+    nonisolated(unsafe) private var idleWaiters: [CheckedContinuation<Void, Never>] = []
 
     /// The tools currently configured for this client.
     var tools: [AnyLLMTool] {
@@ -136,13 +138,45 @@ public final class LlamaClient: LLMClient {
     /// stream was running.
     private func endStream() {
         stateLock.lock()
-        defer { stateLock.unlock() }
         activeStreams -= 1
-        guard activeStreams == 0, !retiredChatParams.isEmpty else { return }
-        for pointer in retiredChatParams {
+        let wentIdle = activeStreams == 0
+        let waiters = wentIdle ? idleWaiters : []
+        if wentIdle { idleWaiters.removeAll() }
+        let retired = wentIdle ? retiredChatParams : []
+        if wentIdle { retiredChatParams.removeAll() }
+        stateLock.unlock()
+
+        for pointer in retired {
             free_chat_params(pointer)
         }
-        retiredChatParams.removeAll()
+        for continuation in waiters {
+            continuation.resume()
+        }
+    }
+
+    /// Waits until no response stream is in flight.
+    ///
+    /// A host that abandons a generation still owns a llama context that the
+    /// stream was writing into. `cancelGeneration()` stops the decode, and this
+    /// is the barrier that says the runtime is no longer touching it — the next
+    /// prompt (and its `clearContext()`) must not start before that.
+    public func waitUntilIdle() async {
+        await withCheckedContinuation { continuation in
+            stateLock.lock()
+            if activeStreams == 0 {
+                stateLock.unlock()
+                continuation.resume()
+                return
+            }
+            idleWaiters.append(continuation)
+            stateLock.unlock()
+        }
+    }
+
+    /// Asks the running decode to abort, prefill included. Cooperative: the
+    /// stream's task ends shortly after, which `waitUntilIdle()` waits for.
+    public func cancelGeneration() {
+        context.cancelGeneration()
     }
 
     /// Generates a text stream from the given input.
@@ -152,6 +186,7 @@ public final class LlamaClient: LLMClient {
     /// - Throws: An `LLMError.failedToDecode` error if the input cannot be decoded.
     public func textStream(from input: LLMInput) throws -> Generator {
         context.discardPendingTokens()
+        context.beginGeneration()
         let tools = self.tools
 
         do {
